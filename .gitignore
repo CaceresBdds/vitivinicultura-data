@@ -1,4 +1,9 @@
 .venv/
 .env
+.env.local
 __pycache__/
 *.pyc
+node_modules/
+dist/
+.pytest_cache/
+*.tsbuildinfo
