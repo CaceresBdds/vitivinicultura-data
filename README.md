@@ -1,210 +1,245 @@
-# Pipeline ETL de datos vitivinícolas
+# Vitivinicultura Argentina
 
-Proyecto de procesamiento y análisis de datos públicos de la actividad vitivinícola argentina utilizando Python, pandas, PostgreSQL y SQL.
+Proyecto de datos sobre la actividad vitivinícola argentina: pipeline ETL en
+Python, base de datos PostgreSQL con vistas analíticas, consultas SQL, consumo
+mediante Power BI y una aplicación web interactiva compuesta por una API REST
+(FastAPI) y un frontend (React + Vite + TypeScript).
 
-El objetivo es construir un pipeline ETL reproducible que extraiga datasets públicos, aplique transformaciones y validaciones sobre los datos, cargue el resultado en PostgreSQL y prepare una capa analítica reutilizable para su posterior consulta y análisis.
+## Objetivo
 
-## Datos utilizados
+Construir un flujo reproducible que procese datasets públicos del Instituto
+Nacional de Vitivinicultura (INV), los cargue en PostgreSQL y exponga una capa
+analítica reutilizable. Sobre esa capa se apoyan el análisis SQL, el consumo
+desde Power BI y la aplicación web, que permite explorar la evolución nacional,
+comparar provincias y analizar la distribución departamental de superficie
+implantada y producción de uva.
 
-Actualmente el proyecto utiliza dos datasets públicos del Instituto Nacional de Vitivinicultura (INV):
+## Fuente de datos
 
-- Superficie implantada con viñedos, período 2012-2024.
-- Producción de uvas, período 2012-2025.
+- **INV (Instituto Nacional de Vitivinicultura)**: datasets públicos de
+  superficie implantada con viñedos y producción de uvas de Argentina.
+- **Datos Argentina / GeoRef (IGN)**: geometrías territoriales oficiales de
+  departamentos, compatibles con GeoRef, usadas por el mapa departamental del
+  frontend. Los identificadores territoriales de los datasets del INV coinciden
+  con los identificadores oficiales de departamento (por ejemplo, `50105` →
+  San Rafael).
 
-Los archivos CSV originales se encuentran en el directorio `data/`.
+## Datasets utilizados
 
-## Flujo general
+Los archivos CSV originales se encuentran en `data/`.
 
-El proyecto sigue el siguiente flujo:
+| Archivo | Contenido | Período | Registros |
+| --- | --- | --- | --- |
+| `inv-superficie-viniedos-2012-2024.csv` | Superficie implantada con viñedos (ha) | 2012-2024 | 9.053 |
+| `inv-produccion-uvas-2012-2025.csv` | Producción de uva (quintales) | 2012-2025 | 7.582 |
+
+Las comparaciones entre superficie y producción utilizan el período común
+**2012-2024**. Producción dispone además de información para 2025, que se
+analiza únicamente a nivel producción.
+
+## Arquitectura general
 
 ```text
-CSV
- ↓
-Extract
- ↓
-Transform
- ↓
-Validate
- ↓
-Load
- ↓
+INV / CSV
+    ↓
+Python + pandas ETL
+    ↓
 PostgreSQL
- ↓
+    ↓
 Vistas analíticas
- ↓
-Consultas SQL de análisis
+    ├── análisis SQL
+    ├── Power BI
+    └── FastAPI REST API
+            ↓
+       React frontend
+            ↓
+   aplicación web interactiva
 ```
 
-## Pipeline ETL
+La aplicación **no** modifica el pipeline ni la base de datos: es un consumidor
+de los datos procesados.
 
-### Extract
+## Pipeline ETL (Python + pandas)
 
-`src/extract.py`
-
-Lee los archivos CSV utilizando pandas y genera los DataFrames utilizados por el resto del pipeline.
-
-Los identificadores geográficos se cargan como texto para preservar correctamente códigos con ceros iniciales o caracteres alfanuméricos.
-
-### Transform
-
-`src/transform.py`
-
-Aplica las transformaciones definidas durante el profiling.
-
-Para superficie:
-
-- identifica registros con información geográfica incompleta;
-- identifica filas exactamente duplicadas.
-
-Para producción:
-
-- identifica filas exactamente duplicadas.
-
-Los registros detectados no se eliminan. Se conservan y se identifican mediante columnas booleanas para evitar modificar información sin evidencia suficiente para considerarla errónea.
-
-### Validate
-
-`src/validate.py`
-
-Comprueba que los DataFrames transformados cumplen las condiciones esperadas antes de modificar la base de datos.
-
-Entre las validaciones se controlan:
-
-- cantidad esperada de registros;
-- cantidad de registros con geografía incompleta;
-- cantidad de filas marcadas como duplicados exactos.
-
-Si alguna validación falla, el pipeline se detiene antes de cargar los datos.
-
-### Load
-
-`src/load.py`
-
-Utiliza Psycopg para conectarse a PostgreSQL.
-
-La carga utiliza una estrategia de full refresh:
+El código del pipeline se encuentra en `src/` y se ejecuta con `python src/pipeline.py`.
 
 ```text
-TRUNCATE
-   ↓
-COPY superficie_vinedos
-   ↓
-COPY produccion_uvas
+Extract → Transform → Validate → Load
 ```
 
-El proceso se ejecuta dentro de una transacción, por lo que una carga incompleta no debe dejar la base de datos en un estado parcial.
+- **Extract** (`src/extract.py`): lee los CSV con pandas. Los identificadores
+  geográficos se cargan como texto para preservar ceros iniciales.
+- **Transform** (`src/transform.py`): identifica registros con geografía
+  incompleta (superficie) y filas exactamente duplicadas (ambos datasets). No
+  elimina registros: los señaliza con columnas booleanas.
+- **Validate** (`src/validate.py`): comprueba cantidades esperadas de filas,
+  registros con geografía incompleta y duplicados exactos antes de cargar. Si
+  falla, el pipeline se detiene.
+- **Load** (`src/load.py`): usa psycopg 3 y una estrategia de *full refresh*
+  (`TRUNCATE` + `COPY`) dentro de una transacción.
 
-## Base de datos
+## PostgreSQL y vistas analíticas
 
-Los datos procesados se almacenan en dos tablas principales:
+Los datos procesados se almacenan en dos tablas:
 
 ```text
 superficie_vinedos
 produccion_uvas
 ```
 
-Los scripts necesarios para crear la base y su estructura se encuentran en `sql/`.
+Los scripts de base de datos están en `sql/`:
 
-### create_database.sql
+- `create_database.sql`: crea la base `vitivinicultura`.
+- `schema.sql`: crea las tablas.
+- `views.sql`: crea seis vistas analíticas con agregaciones reutilizables.
 
-Crea la base de datos:
-
-```text
-vitivinicultura
-```
-
-### schema.sql
-
-Crea las tablas utilizadas por el pipeline.
-
-### views.sql
-
-Crea una capa de vistas analíticas con agregaciones reutilizables.
-
-Actualmente se definen las siguientes vistas:
+Vistas disponibles:
 
 ```text
-vw_superficie_nacional_anual
-vw_produccion_nacional_anual
-
-vw_superficie_provincial_anual
-vw_produccion_provincial_anual
-
-vw_superficie_departamental_anual
-vw_produccion_departamental_anual
+vw_superficie_nacional_anual        vw_produccion_nacional_anual
+vw_superficie_provincial_anual      vw_produccion_provincial_anual
+vw_superficie_departamental_anual   vw_produccion_departamental_anual
 ```
 
-Las vistas no almacenan físicamente una copia de los resultados.
-
-PostgreSQL conserva la definición de cada consulta y obtiene los datos desde las tablas base cuando la vista es consultada.
-
-Las vistas permiten centralizar agregaciones frecuentes y evitar repetir lógica como `SUM()` y `GROUP BY` en las consultas analíticas.
+Las vistas no almacenan resultados: PostgreSQL ejecuta su consulta subyacente
+cuando son consultadas, evitando repetir agregaciones (`SUM`, `GROUP BY`).
 
 ## Análisis SQL
 
-Las consultas de análisis se encuentran en:
-
-```text
-sql/analysis/
-```
-
-Esta capa utiliza principalmente las vistas analíticas para responder preguntas sobre:
+Las consultas de análisis se encuentran en `sql/analysis/` y consumen
+principalmente las vistas. Cubren, entre otros temas:
 
 - evolución nacional de superficie y producción;
-- variaciones interanuales;
-- cambio acumulado entre 2012 y 2024;
+- variaciones interanuales y cambio acumulado 2012-2024;
 - comparación de la dirección de ambas métricas;
-- distribución provincial;
-- rankings provinciales;
-- cambios provinciales entre 2012 y 2024;
-- participación provincial sobre los totales nacionales;
+- distribución, rankings, cambios y participación provincial;
 - diferencias de cobertura entre ambos datasets;
 - ratio agregado de producción sobre superficie;
 - distribución y rankings departamentales;
 - comportamiento de la producción durante 2025.
 
-Los análisis que comparan superficie y producción utilizan principalmente el período común 2012-2024.
+## Power BI como forma de consumo
 
-El año 2025 se analiza únicamente para producción porque el dataset de superficie finaliza en 2024.
+La capa de vistas analíticas es independiente de la aplicación web y puede
+consumirse desde herramientas de BI. En particular, **Power BI** puede
+conectarse a PostgreSQL (conector PostgreSQL) y usar las tablas y vistas
+descritas para construir tableros propios.
 
-## Estructura del proyecto
+Esta vía reutiliza la misma capa analítica que la API: la ausencia de datos se
+conserva como `NULL` y no se interpreta como cero.
+
+## API REST con FastAPI
+
+El backend es una API REST de solo lectura construida con FastAPI, Uvicorn,
+psycopg 3 y SQL directo (sin ORM). Se encuentra en `app/backend/` y consulta
+PostgreSQL usando las vistas analíticas. Base path: `/api`.
+
+Endpoints:
+
+```text
+GET /api/national/summary
+GET /api/national/evolution
+GET /api/provinces?year=YYYY
+GET /api/provinces/{provinceId}/summary?year=YYYY
+GET /api/provinces/{provinceId}/history
+GET /api/provinces/{provinceId}/departments?year=YYYY
+```
+
+Características:
+
+- respuestas JSON con nombres en `camelCase` y valores numéricos como números;
+- identificadores geográficos como strings;
+- validación de `year` dentro del período 2012-2024 (HTTP 400 si es inválido,
+  HTTP 404 si la provincia no existe);
+- errores en formato `{ "error": "..." }` sin exponer detalles internos;
+- cálculos derivados en el backend a partir de las vistas (variaciones,
+  participaciones y ratio producción/superficie);
+- valores faltantes preservados como `null`.
+
+La documentación interactiva de FastAPI queda disponible en `/docs`.
+
+## Frontend React + Vite + TypeScript
+
+El frontend es una SPA en `app/frontend/` construida con React, Vite,
+TypeScript, React Router, Recharts y Leaflet / React Leaflet. Consume
+exclusivamente la API REST; no accede a PostgreSQL ni lee los CSV.
+
+Rutas:
+
+```text
+/                        Panorama nacional
+/provinces               Análisis provincial
+/provinces/:provinceId   Detalle de provincia
+```
+
+Páginas:
+
+- **Panorama nacional**: indicadores de superficie y producción (2024 y cambio
+  2012-2024), evolución histórica y variación interanual (2013-2024).
+- **Análisis provincial**: filtro por año, rankings de superficie y producción,
+  selección de provincia y resumen con participación y ratio
+  producción/superficie.
+- **Detalle de provincia**: resumen provincial, evolución histórica y análisis
+  departamental con mapa y ranking.
+
+El frontend incluye estados explícitos de carga, error (con acción de
+reintento) y ausencia de datos, y un diseño responsive.
+
+## Visualizaciones y mapa departamental
+
+- Gráficos temporales (líneas) y rankings provinciales/departamentales
+  (barras horizontales) con Recharts.
+- **Mapa coroplético de departamentos** de Leaflet que muestra únicamente la
+  provincia seleccionada, cargando su geometría desde
+  `app/frontend/public/geo/departments/{provinciaId}.geojson`.
+- Selector de métrica **Superficie (verde) / Producción (bordó)** que actualiza
+  mapa, escala de color, leyenda, tooltips y ranking de forma sincronizada.
+- Selección de departamento sincronizada entre mapa y ranking.
+- Los departamentos sin dato para la métrica activa se muestran con un estilo
+  distinto (gris/discontinuo) y tooltip *"Sin dato disponible"*; nunca se
+  representan como valor cero.
+
+## Calidad de datos
+
+- **Duplicados exactos conservados y señalizados**: no se eliminan; se marcan
+  con la columna booleana `duplicado_exacto` (2 filas involucradas en cada
+  dataset) al no existir evidencia suficiente para considerarlos errores.
+- **Geografía incompleta**: los registros de superficie sin ubicación completa
+  (3 registros) se conservan y se señalizan con `geografia_incompleta`.
+  Permanecen en los totales nacionales, pero se excluyen de los agregados
+  provinciales y departamentales donde no pueden atribuirse territorialmente.
+- **Valores faltantes ≠ cero**: la ausencia de registros se representa como
+  `null`/dato no disponible en la base, la API y la interfaz. Nunca se
+  convierte automáticamente en `0`.
+- **Uso de IDs geográficos**: los datos analíticos y las geometrías GeoJSON se
+  relacionan por identificador territorial (`provincia_id` / `departamento_id` →
+  `departmentId` = `id` del GeoJSON), no por nombre. Los GeoJSON contienen
+  únicamente geometría e identificadores/nombres, sin valores analíticos.
+
+## Estructura del repositorio
 
 ```text
 vitivinicultura-data/
-├── data/
-│   ├── inv-superficie-viniedos-2012-2024.csv
-│   └── inv-produccion-uvas-2012-2025.csv
-│
-├── exploration/
-│   └── profiling_superficie.py
-│
+├── data/                      # CSV originales del INV
+├── docs/                      # especificaciones del producto y la app
+├── exploration/               # profiling inicial (no forma parte del pipeline)
 ├── sql/
 │   ├── create_database.sql
 │   ├── schema.sql
 │   ├── views.sql
-│   │
-│   └── analysis/
-│       ├── 01_evolucion_nacional.sql
-│       ├── 02_variacion_interanual.sql
-│       ├── 03_cambio_acumulado.sql
-│       ├── 04_comparacion_evolucion.sql
-│       ├── 05_superficie_por_provincia.sql
-│       ├── 06_produccion_por_provincia.sql
-│       ├── 07_ranking_provincial.sql
-│       ├── 08_cambio_provincial.sql
-│       ├── 09_participacion_provincial.sql
-│       ├── 10_cobertura_provincial.sql
-│       ├── 11_ratio_produccion_superficie.sql
-│       ├── 12_analisis_departamental.sql
-│       └── 13_produccion_2025.sql
-│
-├── src/
-│   ├── extract.py
-│   ├── transform.py
-│   ├── validate.py
-│   ├── load.py
-│   └── pipeline.py
-│
+│   └── analysis/              # 13 consultas de análisis
+├── src/                       # pipeline ETL (extract, transform, validate, load)
+├── app/
+│   ├── backend/               # API REST FastAPI + psycopg 3
+│   │   ├── app/               # main, db, routers, services, schemas
+│   │   ├── tests/             # pruebas de integración de la API
+│   │   ├── requirements.txt
+│   │   └── README.md
+│   └── frontend/              # SPA React + Vite + TypeScript
+│       ├── public/geo/departments/   # GeoJSON oficiales por provincia
+│       ├── src/               # pages, components, services, hooks, styles
+│       ├── package.json
+│       └── tsconfig.json
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
@@ -213,50 +248,34 @@ vitivinicultura-data/
 
 ## Requisitos
 
-Se necesita tener instalado:
-
-- Python
+- Python 3
 - PostgreSQL
+- Node.js (para el frontend)
 
-Las dependencias de Python se encuentran declaradas en `requirements.txt`.
-
-Actualmente:
+Dependencias del pipeline (`requirements.txt`):
 
 ```text
-pandas
+pandas==3.0.5
+psycopg[binary]==3.3.5
+python-dotenv==1.2.3
+```
+
+Dependencias del backend (`app/backend/requirements.txt`):
+
+```text
+fastapi
+uvicorn[standard]
 psycopg[binary]
 python-dotenv
 ```
 
-## Instalación
+Dependencias del frontend (`app/frontend/package.json`): React, Vite,
+TypeScript, React Router, Recharts, Leaflet y React Leaflet.
 
-Crear un entorno virtual:
+## Configuración mediante variables de entorno
 
-```powershell
-python -m venv .venv
-```
-
-Activarlo en PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-Instalar las dependencias:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-## Configuración
-
-Crear un archivo `.env` a partir de `.env.example`:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Configurar las credenciales correspondientes:
+El backend y el pipeline reutilizan las siguientes variables (definidas en
+`.env`, que no debe incorporarse al repositorio):
 
 ```env
 DB_HOST=localhost
@@ -266,131 +285,57 @@ DB_USER=postgres
 DB_PASSWORD=
 ```
 
-El archivo `.env` contiene configuración local y credenciales, por lo que no debe incorporarse al repositorio.
+El frontend utiliza:
 
-## Creación de la base de datos
-
-Primero ejecutar:
-
-```text
-sql/create_database.sql
+```env
+VITE_API_URL=http://localhost:8000/api
 ```
 
-desde una conexión a una base existente de PostgreSQL, por ejemplo `postgres`.
+No se almacenan credenciales en el código.
 
-Luego conectarse a:
+## Ejecución mínima
 
-```text
-vitivinicultura
-```
+### 1. Base de datos
 
-y ejecutar:
+Ejecutar, en orden: `sql/create_database.sql`, `sql/schema.sql` y `sql/views.sql`.
 
-```text
-sql/schema.sql
-```
+### 2. Pipeline ETL
 
-Este script crea las tablas:
-
-```text
-superficie_vinedos
-produccion_uvas
-```
-
-Después ejecutar:
-
-```text
-sql/views.sql
-```
-
-para crear las vistas analíticas.
-
-Las vistas pueden crearse aunque las tablas todavía estén vacías, ya que almacenan la definición de las consultas y utilizarán los datos disponibles cuando sean consultadas.
-
-## Ejecución del pipeline
-
-Desde la raíz del proyecto:
-
-```powershell
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python src/pipeline.py
 ```
 
-El pipeline ejecuta:
+### 3. Backend FastAPI
 
-```text
-Extract
-   ↓
-Transform
-   ↓
-Validate
-   ↓
-Load
+```bash
+python -m pip install -r app/backend/requirements.txt
+cd app/backend
+uvicorn app.main:app --reload --port 8000
 ```
 
-y carga los dos datasets procesados en PostgreSQL.
+### 4. Frontend React
 
-## Validación de la carga
-
-Después de una ejecución correcta, las tablas contienen actualmente:
-
-```text
-superficie_vinedos → 9053 registros
-produccion_uvas    → 7582 registros
-```
-
-También se conservan indicadores de calidad detectados durante el profiling:
-
-```text
-Superficie:
-- 3 registros con geografía incompleta.
-- 2 filas involucradas en un duplicado exacto.
-
-Producción:
-- 2 filas involucradas en un duplicado exacto.
-```
-
-Estos registros se conservan deliberadamente.
-
-La estrategia de full refresh permite ejecutar nuevamente el pipeline sin acumular registros correspondientes a ejecuciones anteriores.
-
-## Ejecución de los análisis
-
-Una vez creadas las tablas, cargados los datos y disponibles las vistas, las consultas de:
-
-```text
-sql/analysis/
-```
-
-pueden ejecutarse directamente sobre la base `vitivinicultura`.
-
-La capa analítica consume principalmente las vistas para evitar repetir las agregaciones definidas a nivel nacional, provincial y departamental.
-
-## Orden de reconstrucción
-
-Para reconstruir el proyecto desde cero:
-
-```text
-1. Crear el entorno de Python e instalar requirements.txt
-2. Crear y configurar .env
-3. Ejecutar sql/create_database.sql
-4. Conectarse a vitivinicultura
-5. Ejecutar sql/schema.sql
-6. Ejecutar sql/views.sql
-7. Ejecutar python src/pipeline.py
-8. Ejecutar las consultas de sql/analysis/
+```bash
+cd app/frontend
+npm install
+npm run dev          # servidor de desarrollo en http://localhost:5173
+npm run build        # build de producción (incluye verificación de TypeScript)
 ```
 
 ## Estado del proyecto
 
-Actualmente se encuentra implementada una primera versión funcional con:
-
 ```text
-Extracción                ✓
-Transformación            ✓
-Validación                ✓
-Carga PostgreSQL          ✓
-Vistas analíticas         ✓
-Consultas SQL de análisis ✓
+Extracción                    ✓
+Transformación                ✓
+Validación                    ✓
+Carga PostgreSQL              ✓
+Vistas analíticas             ✓
+Análisis SQL                  ✓
+Consumo vía Power BI          ✓ (capa analítica disponible)
+API REST FastAPI              ✓
+Frontend React + Vite + TS    ✓
+Mapa departamental (GeoJSON)  ✓
 ```
-
-Los datos quedan preparados en PostgreSQL para continuar con etapas posteriores de explotación y visualización.
